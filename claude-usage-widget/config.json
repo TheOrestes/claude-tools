@@ -1,0 +1,10 @@
+{
+  "font_family": "Space Grotesk",
+  "budget_usd_per_window": 100.0,
+  "auto_calibrate": false,
+  "refresh_seconds": 15,
+  "opacity": 0.8,
+  "scale": 0,
+  "zoom": 1.0,
+  "theme": "Midnight"
+}
