@@ -1,5 +1,5 @@
-import json, tkinter as tk, tkinter.font as tkf, urllib.request
-import math
+import json, subprocess, tkinter as tk, tkinter.font as tkf, urllib.request
+import math, time
 from functools import lru_cache
 import psutil
 from PIL import Image, ImageDraw, ImageTk
@@ -15,7 +15,7 @@ THEMES = {  # bg, track, text, muted, accent, hot
     "Amber":    ("#1d1a14", "#3b342a", "#f5ecd9", "#a3987f", "#ffb454", "#ff6b4a"),
 }
 CFG_PATH = os.path.expanduser("~/.syswidget.json")
-CFG = dict(theme="Claude", zoom=1.0, alpha=0.95, x=40, y=40)
+CFG = dict(theme="Claude", zoom=1.0, alpha=0.95, x=40, y=40, every=1)
 try: CFG.update(json.load(open(CFG_PATH)))
 except Exception: pass
 def save():
@@ -64,6 +64,17 @@ def read():
             d["ssd"].append((hw, v))
     return d
 
+def powercfg(*a):
+    return subprocess.run(["powercfg", *a], capture_output=True, text=True, creationflags=0x08000000).stdout  # no console flash
+
+def is_gaming():  # gaming = CPU turbo allowed (max processor state 100%); regular = 99% (turbo off)
+    try: return int(powercfg("/q", "SCHEME_CURRENT", "SUB_PROCESSOR", "PROCTHROTTLEMAX").split("Current AC Power Setting Index:")[1].split()[0], 16) >= 100
+    except Exception: return True
+
+def set_gaming(on):
+    for k in ("ac", "dc"): powercfg(f"/set{k}valueindex", "SCHEME_CURRENT", "SUB_PROCESSOR", "PROCTHROTTLEMAX", "100" if on else "99")
+    powercfg("/setactive", "SCHEME_CURRENT")
+
 win = tk.Tk()
 win.overrideredirect(True); win.attributes("-topmost", True, "-alpha", CFG["alpha"]); win.configure(bg=BG)
 win.geometry(f'+{CFG["x"]}+{CFG["y"]}')
@@ -71,14 +82,14 @@ FONT = next((f for f in ("Space Grotesk", "Segoe UI") if f in tkf.families()), "
 font = lambda sz, bold=False: (FONT, max(1, round(sz * CFG["zoom"])), "bold" if bold else "normal")
 cv = tk.Canvas(win, bg=BG, highlightthickness=0); cv.pack()
 
-state = dict(cpu_open=False, data=read())
+state = dict(cpu_open=False, data=read(), gaming=is_gaming(), net=[], nic="", t=time.time(), io=psutil.net_io_counters(pernic=True))
 hits = []  # (x0, y0, x1, y1, key)
 
-def bar(x, y, w, pct, label="", right=""):
+def bar(x, y, w, pct, label="", right="", h=10):
     cv.create_text(x, y + 6, text=label, fill=MUTED, anchor="w", font=font(8))
-    bx = x + (22 if label else 0)
-    cv.create_rectangle(bx, y + 1, x + w - (34 if right else 0), y + 11, fill=TRACK, width=0)
-    cv.create_rectangle(bx, y + 1, bx + (x + w - (34 if right else 0) - bx) * min(pct, 100) / 100, y + 11, fill=ORANGE, width=0)
+    bx, y0 = x + (22 if label else 0), y + 6 - h / 2
+    cv.create_rectangle(bx, y0, x + w - (34 if right else 0), y0 + h, fill=TRACK, width=0)
+    cv.create_rectangle(bx, y0, bx + (x + w - (34 if right else 0) - bx) * min(pct, 100) / 100, y0 + h, fill=ORANGE, width=0)
     if right: cv.create_text(x + w, y + 6, text=right, fill=FG, anchor="e", font=font(8))
 
 @lru_cache(maxsize=256)
@@ -99,6 +110,19 @@ def arc_img(t, z, theme):  # Tk canvas arcs are aliased; draw 4x with PIL and do
         arc(270 * max(0.02, min(1, (t - 20) / 80)), HOT if t >= 85 else ORANGE)
     return ImageTk.PhotoImage(im.resize((size // k, size // k), Image.LANCZOS))
 
+@lru_cache(maxsize=16)
+def toggle_img(on, z, theme):  # same 4x supersample trick as arc_img
+    k, w, h = 4, 34, 16
+    im = Image.new("RGB", (round(w * z * k), round(h * z * k)), BG)
+    W_, H_ = im.size
+    d = ImageDraw.Draw(im)
+    d.rounded_rectangle((0, 0, W_ - 1, H_ - 1), radius=H_ / 2, fill=ORANGE if on else TRACK)
+    m = 2 * z * k
+    r = H_ - 2 * m
+    x = W_ - m - r if on else m
+    d.ellipse((x, m, x + r, m + r), fill=FG)
+    return ImageTk.PhotoImage(im.resize((round(w * z), round(h * z)), Image.LANCZOS))
+
 def gauge(cx, cy, r, t, label):
     cv.create_image(cx, cy, image=arc_img(None if t is None else round(t), CFG["zoom"], CFG["theme"]))
     cv.create_text(cx, cy, text="–" if t is None else f"{t:.0f}°", fill=FG, font=font(12, True))
@@ -116,7 +140,11 @@ def draw():
     cv.create_text(PAD, 16, text="SYSTEM", fill=FG, anchor="w", font=font(10, True))
     cv.create_text(W - PAD, 16, text="✕", fill=MUTED, anchor="e", font=font(10))
     hits.append((W - 40, 0, W, 30, "close"))
-    y = 34
+    on = state["gaming"]
+    cv.create_text(PAD, 44, text="Gaming mode" if on else "Regular mode", fill=FG, anchor="w", font=font(9))
+    cv.create_image(W - PAD - 17, 44, image=toggle_img(on, CFG["zoom"], CFG["theme"]))
+    hits.append((0, 34, W, 54, "mode"))
+    y = 62
     g = [("CPU", d["cpu_t"]), ("GPU", d["gpu_t"])] + [(f"SSD{i}", v) for i, (hw, v) in enumerate(d["ssd"])]
     cell = (W - 2 * PAD) / 4
     for i, (lbl, t) in enumerate(g):
@@ -130,7 +158,7 @@ def draw():
         half = (len(load) + 1) // 2
         cw = (W - 2 * PAD - 10) / 2
         for i, p in enumerate(load):
-            bar(PAD + (cw + 10) * (i // half), y + 15 * (i % half), cw, p, f"{i}", f"{p:.0f}%")
+            bar(PAD + (cw + 10) * (i // half), y + 15 * (i % half), cw, p, f"{i}", f"{p:.0f}%", h=7)
         y += 15 * half + 4
     else:
         bar(PAD, y, W - 2 * PAD, avg); y += 18
@@ -142,14 +170,36 @@ def draw():
     if d["gpu_w"] is not None or d["gpu_t"] is not None:
         header(y + 6, None, "GPU", " · ".join(f"{v:.0f}{u}" for v, u in ((d["gpu_t"], "°C"), (d["gpu_w"], " W")) if v is not None)); y += 22
         bar(PAD, y, W - 2 * PAD, d["gpu_l"] or 0); y += 18
+    dn, up = state["net"][-1] if state["net"] else (0, 0)
+    header(y + 6, None, "NET", f"↓ {dn:.2f}  ↑ {up:.2f} MB/s"); y += 22
+    gh, gw, n = 44, W - 2 * PAD, 60
+    mid = y + gh / 2
+    cv.create_rectangle(PAD, y, PAD + gw, y + gh, fill=TRACK, width=0)
+    peak = max([1.0] + [v for p in state["net"] for v in p])  # ponytail: scale to last-60-sample peak, min 1 MB/s
+    cw = gw / n
+    for k, (dv, uv) in enumerate(state["net"][-n:], n - len(state["net"][-n:])):  # newest at right; download up, upload down
+        x = PAD + cw * k
+        cv.create_rectangle(x, mid - gh / 2 * dv / peak, x + cw - 1, mid, fill=ORANGE, width=0)
+        cv.create_rectangle(x, mid, x + cw - 1, mid + gh / 2 * uv / peak, fill=FG, width=0)
+    y += gh + 6
     if not d["ok"]:
         cv.create_text(PAD, y + 12, text="start LibreHardwareMonitor (admin,\nweb server on) for temps", fill=MUTED, anchor="w", font=font(8)); y += 34
     z = CFG["zoom"]
     cv.scale("all", 0, 0, z, z)
     cv.config(width=W * z, height=(y + 10) * z)
 
+def net_sample():  # active NIC = the busiest one this interval; history is (down, up) in MB/s
+    now, io = time.time(), psutil.net_io_counters(pernic=True)
+    dt, old = max(now - state["t"], 1e-3), state["io"]
+    rates = {n: ((c.bytes_recv - old[n].bytes_recv) / dt, (c.bytes_sent - old[n].bytes_sent) / dt) for n, c in io.items() if n in old}
+    state.update(t=now, io=io)
+    if rates:
+        state["nic"] = max(rates, key=lambda n: sum(rates[n]))
+        state["net"].append(tuple(v / 2**20 for v in rates[state["nic"]]))
+        del state["net"][:-60]
+
 def tick():
-    state["data"] = read(); draw(); win.after(1000, tick)
+    net_sample(); state["data"] = read(); draw(); state["job"] = win.after(int(CFG["every"] * 1000), tick)
 
 def press(e): win._p = (e.x_root, e.y_root, win.winfo_x(), win.winfo_y())
 def drag(e):
@@ -162,13 +212,16 @@ def release(e):
     for x0, y0, x1, y1, k in hits:
         if x0 <= e.x / CFG["zoom"] <= x1 and y0 <= e.y / CFG["zoom"] <= y1:
             if k == "close": win.destroy(); return
-            state["cpu_open"] = not state["cpu_open"]; draw()
+            if k == "mode": state["gaming"] = not state["gaming"]; set_gaming(state["gaming"])
+            else: state["cpu_open"] = not state["cpu_open"]
+            draw()
 cv.bind("<Button-1>", press); cv.bind("<B1-Motion>", drag); cv.bind("<ButtonRelease-1>", release)
 
 def setcfg(k, v):
     CFG[k] = v; save()
     if k == "alpha": win.attributes("-alpha", v)
     if k == "theme": palette()
+    if k == "every": win.after_cancel(state["job"]); tick(); return  # apply now, not after the old (maybe 10 s) wait
     draw()
 
 menu = tk.Menu(win, tearoff=0)
@@ -176,6 +229,7 @@ for label, key, opts in (
     ("Zoom", "zoom", [(f"{int(z * 100)}%", z) for z in (.75, 1.0, 1.25, 1.5, 1.75, 2.0)]),
     ("Opacity", "alpha", [(f"{int(a * 100)}%", a) for a in (.5, .6, .7, .8, .9, 1.0)]),
     ("Theme", "theme", [(n, n) for n in THEMES]),
+    ("Refresh rate", "every", [(f"{s:g} s" + (" (low power)" if s >= 5 else ""), s) for s in (.5, 1, 2, 5, 10)]),
 ):
     sub = tk.Menu(menu, tearoff=0)
     var = tk.Variable(value=CFG[key])
